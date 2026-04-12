@@ -1,0 +1,14 @@
+[package]
+name = "starlink-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "prost-derived message types for the SpaceX Starlink Device gRPC API (no_std + alloc)"
+
+[lints]
+workspace = true
+
+[dependencies]
+prost.workspace = true

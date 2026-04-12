@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/starlink-proto",
+    "crates/starlink-core",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pawelc/starlink-cli"
+
+[workspace.dependencies]
+# `default-features = false` disables prost's `std` feature, leaving a
+# `no_std + alloc` build.  We want the derive macros.
+prost = { version = "0.14", default-features = false, features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

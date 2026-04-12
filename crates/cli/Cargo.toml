@@ -1,0 +1,19 @@
+[package]
+name = "starlink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Starlink Device API command-line client"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "starlink"
+path = "src/main.rs"
+
+[dependencies]
+starlink-core = { path = "../starlink-core" }
+starlink-proto = { path = "../starlink-proto" }

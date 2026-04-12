@@ -1,0 +1,15 @@
+[package]
+name = "starlink-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "gRPC wire framing and Transport trait for the Starlink Device API (no_std + alloc)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Zero external deps on purpose — this crate is the portable core and we want
+# to be very deliberate about anything it pulls in.
