@@ -50,7 +50,7 @@ pub struct Request {
     /// The oneof arm identifying which operation this request carries.
     #[prost(
         oneof = "request::Body",
-        tags = "1001, 1004, 1006, 1007, 1008, 1009, 1017, 1022, 2008, 6000"
+        tags = "1001, 1004, 1006, 1007, 1008, 1009, 1017, 1022, 2008, 3002, 3015, 6000"
     )]
     pub body: Option<request::Body>,
 }
@@ -129,6 +129,27 @@ impl Request {
         Self::new(request::Body::GetDiagnostics(GetDiagnosticsRequest {}))
     }
 
+    /// `Request { wifi_get_clients: WifiGetClientsRequest{} }`.
+    ///
+    /// Served by the **router** endpoint (e.g. `192.168.1.1:9000`), not the
+    /// dish — it lists the Wi-Fi/Ethernet clients and mesh nodes attached to
+    /// the router.
+    #[must_use]
+    pub fn wifi_get_clients() -> Self {
+        Self::new(request::Body::WifiGetClients(WifiGetClientsRequest {}))
+    }
+
+    /// `Request { wifi_get_client_history: { client_id } }`.
+    ///
+    /// Router endpoint.  `client_id` comes from the `client_id` field of a
+    /// [`crate::response::WifiClient`] returned by [`Self::wifi_get_clients`].
+    #[must_use]
+    pub fn wifi_get_client_history(client_id: u32) -> Self {
+        Self::new(request::Body::WifiGetClientHistory(
+            WifiGetClientHistoryRequest { client_id },
+        ))
+    }
+
     /// `Request { reboot: RebootRequest{} }`.
     ///
     /// **Write operation.**  Exposed because the encoding is trivial and
@@ -175,6 +196,12 @@ pub mod request {
         /// `dish_get_obstruction_map = 2008`.
         #[prost(message, tag = "2008")]
         DishGetObstructionMap(super::DishGetObstructionMapRequest),
+        /// `wifi_get_clients = 3002`.
+        #[prost(message, tag = "3002")]
+        WifiGetClients(super::WifiGetClientsRequest),
+        /// `wifi_get_client_history = 3015`.
+        #[prost(message, tag = "3015")]
+        WifiGetClientHistory(super::WifiGetClientHistoryRequest),
         /// `get_diagnostics = 6000`.
         #[prost(message, tag = "6000")]
         GetDiagnostics(super::GetDiagnosticsRequest),
@@ -220,6 +247,18 @@ pub struct DishGetObstructionMapRequest {}
 /// `SpaceX.API.Device.GetDiagnosticsRequest` — empty message.
 #[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
 pub struct GetDiagnosticsRequest {}
+
+/// `SpaceX.API.Device.WifiGetClientsRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct WifiGetClientsRequest {}
+
+/// `SpaceX.API.Device.WifiGetClientHistoryRequest` — selects one client by id.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct WifiGetClientHistoryRequest {
+    /// The `client_id` of the client whose history to return.
+    #[prost(uint32, tag = "2")]
+    pub client_id: u32,
+}
 
 #[cfg(test)]
 mod tests {
@@ -276,7 +315,7 @@ mod tests {
     /// convenience method and the oneof declaration.
     #[test]
     fn every_constructor_round_trips() {
-        let cases: [Request; 10] = [
+        let cases: [Request; 12] = [
             Request::reboot(),
             Request::get_status(),
             Request::get_next_id(),
@@ -286,6 +325,8 @@ mod tests {
             Request::get_location(),
             Request::get_persistent_stats(),
             Request::dish_get_obstruction_map(),
+            Request::wifi_get_clients(),
+            Request::wifi_get_client_history(1_582_731_053),
             Request::get_diagnostics(),
         ];
         for original in cases {

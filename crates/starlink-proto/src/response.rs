@@ -33,7 +33,7 @@ pub struct Response {
     #[prost(uint64, tag = "3")]
     pub api_version: u64,
     /// The populated response arm.
-    #[prost(oneof = "response::Body", tags = "2004, 2006")]
+    #[prost(oneof = "response::Body", tags = "2004, 2006, 3002, 3015")]
     pub body: Option<response::Body>,
 }
 
@@ -54,6 +54,14 @@ pub mod response {
         /// `dish_get_history = 2006` — the reply to a `get_history` request.
         #[prost(message, tag = "2006")]
         DishGetHistory(super::DishGetHistoryResponse),
+        /// `wifi_get_clients = 3002` — the reply to a `wifi_get_clients`
+        /// request (router endpoint).
+        #[prost(message, tag = "3002")]
+        WifiGetClients(super::WifiGetClientsResponse),
+        /// `wifi_get_client_history = 3015` — per-client throughput history
+        /// (router endpoint).
+        #[prost(message, tag = "3015")]
+        WifiGetClientHistory(super::WifiGetClientHistoryResponse),
     }
 }
 
@@ -346,6 +354,131 @@ pub fn outage_cause_name(v: i32) -> &'static str {
     }
 }
 
+/// `SpaceX.API.Device.WifiGetClientsResponse` — served by the router endpoint.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WifiGetClientsResponse {
+    /// Attached clients and mesh nodes.
+    #[prost(message, repeated, tag = "1")]
+    pub clients: Vec<WifiClient>,
+}
+
+/// `SpaceX.API.Device.WifiClient` (decode subset).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WifiClient {
+    /// Friendly device name (may be empty for some clients).
+    #[prost(string, tag = "1")]
+    pub name: String,
+    /// MAC address.
+    #[prost(string, tag = "2")]
+    pub mac_address: String,
+    /// IPv4 address (empty if none leased).
+    #[prost(string, tag = "3")]
+    pub ip_address: String,
+    /// Signal strength, dBm (0 for wired clients).
+    #[prost(float, tag = "4")]
+    pub signal_strength: f32,
+    /// Receive (download) statistics.
+    #[prost(message, optional, tag = "5")]
+    pub rx_stats: Option<WifiRxStats>,
+    /// Transmit (upload) statistics.
+    #[prost(message, optional, tag = "6")]
+    pub tx_stats: Option<WifiTxStats>,
+    /// Seconds since this client associated.
+    #[prost(uint32, tag = "7")]
+    pub associated_time_s: u32,
+    /// `WifiClient.Interface` enum — ETH / `RF_2GHZ` / `RF_5GHZ` / …  See
+    /// [`wifi_interface_name`].
+    #[prost(int32, tag = "9")]
+    pub iface: i32,
+    /// Signal-to-noise ratio, dB (0 for wired clients).
+    #[prost(float, tag = "10")]
+    pub snr: f32,
+    /// MAC of the upstream node this client is connected through.
+    #[prost(string, tag = "13")]
+    pub upstream_mac_address: String,
+    /// `WifiClient.Role` enum — CLIENT / REPEATER / CONTROLLER.  See
+    /// [`wifi_role_name`].
+    #[prost(int32, tag = "14")]
+    pub role: i32,
+    /// Mesh hops between this client and the controller.
+    #[prost(uint32, tag = "32")]
+    pub hops_from_controller: u32,
+    /// Stable per-client id, used to request this client's history via
+    /// [`crate::device::Request::wifi_get_client_history`].  `0` for nodes
+    /// that have none (e.g. the controller itself).
+    #[prost(uint32, tag = "43")]
+    pub client_id: u32,
+}
+
+/// `SpaceX.API.Device.WifiClient.RxStats` (decode subset).
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct WifiRxStats {
+    /// Total bytes received from this client.
+    #[prost(uint64, tag = "1")]
+    pub bytes: u64,
+    /// Current PHY rate, Mbps.
+    #[prost(uint32, tag = "8")]
+    pub rate_mbps: u32,
+}
+
+/// `SpaceX.API.Device.WifiClient.TxStats` (decode subset).
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct WifiTxStats {
+    /// Total bytes transmitted to this client.
+    #[prost(uint64, tag = "1")]
+    pub bytes: u64,
+    /// Current PHY rate, Mbps.
+    #[prost(uint32, tag = "8")]
+    pub rate_mbps: u32,
+}
+
+/// `SpaceX.API.Device.WifiGetClientHistoryResponse` (decode subset).
+///
+/// Per-client ring buffers, same `current`-index convention as
+/// [`DishGetHistoryResponse`].  `rx_rate_mbps` and `rssi` are often empty
+/// (the router only fills them in some conditions).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WifiGetClientHistoryResponse {
+    /// Monotonic sample counter / ring write index.
+    #[prost(uint64, tag = "1")]
+    pub current: u64,
+    /// Transmit (to-client / download) throughput per sample, Mbps.
+    #[prost(float, repeated, tag = "2")]
+    pub tx_throughput_mbps: Vec<f32>,
+    /// Receive (from-client / upload) throughput per sample, Mbps.
+    #[prost(float, repeated, tag = "3")]
+    pub rx_throughput_mbps: Vec<f32>,
+    /// Receive PHY rate per sample, Mbps (often empty).
+    #[prost(float, repeated, tag = "5")]
+    pub rx_rate_mbps: Vec<f32>,
+    /// Per-sample RSSI, one signed byte (dBm) each (often empty).
+    #[prost(bytes = "vec", tag = "6")]
+    pub rssi: Vec<u8>,
+}
+
+/// Map a `SpaceX.API.Device.WifiClient.Interface` enum value to its name.
+#[must_use]
+pub fn wifi_interface_name(v: i32) -> &'static str {
+    match v {
+        1 => "ETH",
+        2 => "RF_2GHZ",
+        3 => "RF_5GHZ",
+        4 => "RF_5GHZ_HIGH",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Map a `SpaceX.API.Device.WifiClient.Role` enum value to its name.
+#[must_use]
+pub fn wifi_role_name(v: i32) -> &'static str {
+    match v {
+        1 => "CLIENT",
+        2 => "REPEATER",
+        3 => "CONTROLLER",
+        _ => "UNKNOWN",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +588,75 @@ mod tests {
                 }],
                 power_in: alloc::vec![20.31, 19.94, 20.28],
             })),
+            ..Response::default()
+        };
+
+        let bytes = original.encode_to_vec();
+        let decoded = Response::decode(&*bytes).expect("decode must succeed");
+        assert_eq!(decoded, original);
+    }
+
+    /// A `wifi_get_clients` response round-trips, including a nested client
+    /// with rx/tx stats, and lands in the 3002 arm.
+    #[test]
+    fn wifi_get_clients_round_trips() {
+        let original = Response {
+            api_version: 128,
+            body: Some(response::Body::WifiGetClients(WifiGetClientsResponse {
+                clients: alloc::vec![
+                    WifiClient {
+                        name: "Controller".to_string(),
+                        mac_address: "74:24:9f:24:a0:0c".to_string(),
+                        iface: 1,
+                        role: 3,
+                        ..WifiClient::default()
+                    },
+                    WifiClient {
+                        name: "Xiaomi-17T-Pro".to_string(),
+                        mac_address: "aa:e2:08:00:00:00".to_string(),
+                        ip_address: "192.168.1.113".to_string(),
+                        signal_strength: -85.0,
+                        snr: 3.0,
+                        iface: 3,
+                        role: 1,
+                        associated_time_s: 261,
+                        upstream_mac_address: "74:24:9f:24:a0:0c".to_string(),
+                        hops_from_controller: 1,
+                        rx_stats: Some(WifiRxStats {
+                            bytes: 43_455_854,
+                            rate_mbps: 260,
+                        }),
+                        tx_stats: Some(WifiTxStats {
+                            bytes: 495_162,
+                            rate_mbps: 54,
+                        }),
+                        client_id: 2_298_735_863,
+                    },
+                ],
+            })),
+            ..Response::default()
+        };
+
+        let bytes = original.encode_to_vec();
+        let decoded = Response::decode(&*bytes).expect("decode must succeed");
+        assert_eq!(decoded, original);
+    }
+
+    /// A `wifi_get_client_history` response round-trips, including the ring
+    /// buffers, and lands in the 3015 arm.
+    #[test]
+    fn wifi_get_client_history_round_trips() {
+        let original = Response {
+            api_version: 128,
+            body: Some(response::Body::WifiGetClientHistory(
+                WifiGetClientHistoryResponse {
+                    current: 2595,
+                    tx_throughput_mbps: alloc::vec![0.0, 0.84, 0.0],
+                    rx_throughput_mbps: alloc::vec![45.18, 12.0],
+                    rx_rate_mbps: alloc::vec![],
+                    rssi: alloc::vec![],
+                },
+            )),
             ..Response::default()
         };
 

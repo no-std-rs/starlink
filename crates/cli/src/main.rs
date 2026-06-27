@@ -12,6 +12,7 @@
 //! starlink align    [--addr HOST:PORT]      # how to aim the dish (current vs desired boresight)
 //! starlink history  [--addr HOST:PORT] [--samples N]   # latency / throughput / power / outages
 //! starlink devices  [--addr HOST:PORT]      # downstream routers / mesh nodes
+//! starlink clients  [--addr HOST:PORT]      # router endpoint: attached Wi-Fi/Ethernet clients
 //! ```
 
 // These fire throughout the human-readable formatting below (seconds as
@@ -35,18 +36,29 @@ use starlink_core::{frame, unframe, Transport};
 use starlink_proto::device::{Request, HANDLE_PATH};
 use starlink_proto::response::{
     attitude_estimation_state_name, has_actuators_name, outage_cause_name, response::Body,
-    router_role_name, DishGetHistoryResponse, DishGetStatusResponse, Response,
+    router_role_name, wifi_interface_name, wifi_role_name, DishGetHistoryResponse,
+    DishGetStatusResponse, Response, WifiGetClientHistoryResponse, WifiGetClientsResponse,
 };
 
 /// Default dish endpoint on the standard Starlink management subnet.
-const DEFAULT_ADDR: &str = "192.168.100.1:9200";
+const DISH_ADDR: &str = "192.168.100.1:9200";
+/// Default router endpoint (the LAN gateway) for Wi-Fi/client queries.
+const ROUTER_ADDR: &str = "192.168.1.1:9000";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let rest = &args[args.len().min(2)..];
-    let addr = parse_opt(rest, "--addr").unwrap_or_else(|| DEFAULT_ADDR.to_string());
+    let cmd = args.get(1).map(String::as_str);
 
-    let result = match args.get(1).map(String::as_str) {
+    // `clients` / `client-history` talk to the router; the rest to the dish.
+    let default_addr = if matches!(cmd, Some("clients" | "client-history")) {
+        ROUTER_ADDR
+    } else {
+        DISH_ADDR
+    };
+    let addr = parse_opt(rest, "--addr").unwrap_or_else(|| default_addr.to_string());
+
+    let result = match cmd {
         Some("status") => cmd_status(&addr),
         Some("align") => cmd_align(&addr),
         Some("history") => {
@@ -56,6 +68,13 @@ fn main() -> ExitCode {
             cmd_history(&addr, samples)
         }
         Some("devices" | "nodes") => cmd_devices(&addr),
+        Some("clients") => cmd_clients(&addr),
+        Some("client-history") => {
+            let samples = parse_opt(rest, "--samples")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(900);
+            cmd_client_history(&addr, samples)
+        }
         Some("-h" | "--help" | "help") => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -78,13 +97,17 @@ fn main() -> ExitCode {
 fn print_usage() {
     eprintln!("usage: starlink <command> [--addr HOST:PORT]");
     eprintln!();
-    eprintln!("commands:");
+    eprintln!("commands (dish endpoint):");
     eprintln!("  status              identity, link, obstruction, alignment, nodes");
     eprintln!("  align               how to aim the dish (current vs desired boresight)");
     eprintln!("  history [--samples N]   latency / throughput / power / outage history");
     eprintln!("  devices             downstream routers / mesh nodes");
     eprintln!();
-    eprintln!("default addr {DEFAULT_ADDR}");
+    eprintln!("commands (router endpoint):");
+    eprintln!("  clients             attached Wi-Fi / Ethernet clients and their stats");
+    eprintln!("  client-history [--samples N]   per-client download/upload throughput history");
+    eprintln!();
+    eprintln!("default addr {DISH_ADDR} (dish), {ROUTER_ADDR} (clients)");
 }
 
 /// Pull `--name VALUE` out of `args`, if present.
@@ -124,6 +147,28 @@ fn dish_history(response: &Response) -> Result<&DishGetHistoryResponse, String> 
         Some(Body::DishGetHistory(h)) => Ok(h),
         _ => Err(status_or(
             "response carried no dish_get_history arm",
+            response,
+        )),
+    }
+}
+
+/// Pull the `wifi_get_clients` arm out of a response, or explain its absence.
+fn wifi_clients(response: &Response) -> Result<&WifiGetClientsResponse, String> {
+    match &response.body {
+        Some(Body::WifiGetClients(c)) => Ok(c),
+        _ => Err(status_or(
+            "response carried no wifi_get_clients arm (is --addr the router?)",
+            response,
+        )),
+    }
+}
+
+/// Pull the `wifi_get_client_history` arm out of a response.
+fn wifi_client_history(response: &Response) -> Result<&WifiGetClientHistoryResponse, String> {
+    match &response.body {
+        Some(Body::WifiGetClientHistory(h)) => Ok(h),
+        _ => Err(status_or(
+            "response carried no wifi_get_client_history arm",
             response,
         )),
     }
@@ -384,6 +429,138 @@ fn cmd_devices(addr: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// clients (router endpoint)
+// ---------------------------------------------------------------------------
+
+fn cmd_clients(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::wifi_get_clients())?;
+    let c = wifi_clients(&response)?;
+
+    println!("attached clients: {}", c.clients.len());
+    for cl in &c.clients {
+        let name = if cl.name.is_empty() {
+            "(unnamed)"
+        } else {
+            cl.name.as_str()
+        };
+        let ip = if cl.ip_address.is_empty() {
+            "-"
+        } else {
+            cl.ip_address.as_str()
+        };
+
+        println!();
+        println!(
+            "  {name:<22} {:<8} {:<11} {ip}",
+            wifi_interface_name(cl.iface),
+            wifi_role_name(cl.role),
+        );
+
+        let mut parts: Vec<String> = Vec::new();
+        if !cl.mac_address.is_empty() {
+            parts.push(cl.mac_address.clone());
+        }
+        // Signal/SNR are only meaningful for wireless clients.
+        if cl.signal_strength != 0.0 || cl.snr != 0.0 {
+            parts.push(format!("{:.0} dBm / snr {:.0}", cl.signal_strength, cl.snr));
+        }
+        let rx_rate = cl.rx_stats.as_ref().map_or(0, |r| r.rate_mbps);
+        let tx_rate = cl.tx_stats.as_ref().map_or(0, |t| t.rate_mbps);
+        if rx_rate != 0 || tx_rate != 0 {
+            parts.push(format!("rate ↓{rx_rate} ↑{tx_rate} Mbps"));
+        }
+        let rx_bytes = cl.rx_stats.as_ref().map_or(0, |r| r.bytes);
+        let tx_bytes = cl.tx_stats.as_ref().map_or(0, |t| t.bytes);
+        if rx_bytes != 0 || tx_bytes != 0 {
+            parts.push(format!(
+                "data ↓{} ↑{}",
+                human_bytes(rx_bytes),
+                human_bytes(tx_bytes)
+            ));
+        }
+        if cl.associated_time_s != 0 {
+            parts.push(format!(
+                "up {}",
+                human_duration(u64::from(cl.associated_time_s))
+            ));
+        }
+        if cl.hops_from_controller != 0 {
+            parts.push(format!(
+                "{} hop(s) from controller",
+                cl.hops_from_controller
+            ));
+        }
+        if !parts.is_empty() {
+            println!("    {}", parts.join("  "));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// client-history (router endpoint)
+// ---------------------------------------------------------------------------
+
+fn cmd_client_history(addr: &str, samples: usize) -> Result<(), String> {
+    // First enumerate clients to learn their ids and names...
+    let list = fetch(addr, &Request::wifi_get_clients())?;
+    let clients = wifi_clients(&list)?;
+
+    let mut any = false;
+    for cl in &clients.clients {
+        // Clients with no id (e.g. the controller) have no per-client history.
+        if cl.client_id == 0 {
+            continue;
+        }
+        let name = if cl.name.is_empty() {
+            cl.mac_address.as_str()
+        } else {
+            cl.name.as_str()
+        };
+
+        // ...then pull each one's history on its own connection.
+        let resp = fetch(addr, &Request::wifi_get_client_history(cl.client_id))?;
+        let h = wifi_client_history(&resp)?;
+        any = true;
+
+        let n = h.tx_throughput_mbps.len().max(h.rx_throughput_mbps.len());
+        let window = if n == 0 { 0 } else { samples.min(n) };
+        println!();
+        println!(
+            "{name}  [{}]  — {window} of {n} samples (~{})",
+            wifi_interface_name(cl.iface),
+            human_duration(window as u64),
+        );
+        if n == 0 {
+            println!("    (no history samples)");
+            continue;
+        }
+        report(
+            "  download (Mbps)",
+            &recent(&h.tx_throughput_mbps, h.current, window),
+            3,
+        );
+        report(
+            "  upload (Mbps)",
+            &recent(&h.rx_throughput_mbps, h.current, window),
+            3,
+        );
+        if !h.rx_rate_mbps.is_empty() {
+            report(
+                "  rx PHY (Mbps)",
+                &recent(&h.rx_rate_mbps, h.current, window),
+                0,
+            );
+        }
+    }
+
+    if !any {
+        println!("no clients with per-client history");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // numeric helpers
 // ---------------------------------------------------------------------------
 
@@ -444,6 +621,21 @@ fn norm_deg(mut d: f32) -> f32 {
 /// Bits/s → Mbps.
 fn mbps(bps: f32) -> f32 {
     bps / 1e6
+}
+
+/// Render a byte count as `1.2 GB` / `41.4 MB` / `512 B` (binary units).
+fn human_bytes(bytes: u64) -> String {
+    const K: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= K * K * K {
+        format!("{:.1} GB", b / (K * K * K))
+    } else if b >= K * K {
+        format!("{:.1} MB", b / (K * K))
+    } else if b >= K {
+        format!("{:.1} KB", b / K)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Render a seconds count as `1d 2h 3m` / `2h 3m` / `3m 4s` / `4s`.

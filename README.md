@@ -94,6 +94,15 @@ the CLI prints matches `grpcurl` captured in the same instant.
     power draw, plus buffered outages.
   - `starlink devices` (alias `nodes`) — downstream routers / mesh nodes with
     role and last-seen age.
+  - `starlink clients` — **router** endpoint (`192.168.1.1:9000`, the LAN
+    gateway, not the dish): attached Wi-Fi/Ethernet clients with interface,
+    role, signal/SNR, PHY rates, byte counters, and mesh hop count.  The dish
+    endpoint returns `Unimplemented` for client enumeration; the router serves
+    it via the `wifi_get_clients` arm.
+  - `starlink client-history [--samples N]` — router endpoint: per-client
+    download/upload throughput history (min/avg/max/p95 over each client's
+    900-sample ring buffer).  Enumerates clients, then fetches
+    `wifi_get_client_history` for each one with a `client_id`.
 
 ## Roadmap
 
