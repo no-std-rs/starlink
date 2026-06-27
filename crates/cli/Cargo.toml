@@ -17,3 +17,6 @@ path = "src/main.rs"
 [dependencies]
 starlink-core = { path = "../starlink-core" }
 starlink-proto = { path = "../starlink-proto" }
+# Needed to encode requests / decode responses.  std is fine in the binary
+# today; prost itself stays in alloc-only mode via the workspace default.
+prost.workspace = true

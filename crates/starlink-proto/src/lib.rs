@@ -22,13 +22,14 @@
 //! * [`reflection`] — `grpc.reflection.v1.ServerReflection` request types,
 //!   used to pull `FileDescriptorSet` bytes off a live dish at runtime for
 //!   schema auditing.
-//!
-//! Response types are not yet defined: the `Response` oneof tag numbers
-//! have not been captured in a form we trust, so they land in a follow-up
-//! commit after a fresh reflection dump.
+//! * [`response`] — `SpaceX.API.Device.Response` decode types (the
+//!   `dish_get_status` arm and the messages it nests).  Response oneof tags
+//!   differ from the request arms and were captured from a fresh reflection
+//!   dump on firmware `2026.06.15.mr81291`.
 #![no_std]
 
 extern crate alloc;
 
 pub mod device;
 pub mod reflection;
+pub mod response;

@@ -66,41 +66,47 @@ need, because we know the exact set of request arms we plan to send.
 
 ## Status
 
-**v0.2 — encoders on prost.**  Workspace compiles clean, clippy-pedantic
-green, 13 unit tests + 1 doc-test passing:
+**v0.3 — end-to-end reads off a live dish.**  Workspace compiles clean,
+clippy-pedantic green, 28 unit tests + 1 doc-test passing.  Verified against
+a Starlink Mini (`mini1_prod2`, firmware `2026.06.15.mr81291`): every value
+the CLI prints matches `grpcurl` captured in the same instant.
 
 - `starlink-core::{frame, unframe, Transport, FrameError}` — gRPC
   length-prefix framing and the transport trait.  Still zero-dep.
-  (7 unit tests.)
-- `starlink-proto::device` — `Request` and ten request-arm sub-messages
-  (`GetStatusRequest`, `GetHistoryRequest`, …) derived from
-  `prost::Message`, with convenience constructors:
-  `Request::get_status()`, `Request::get_history()`, etc.  Plus the
-  `HANDLE_PATH` HTTP/2 `:path` constant.  (8 unit tests.)
-- `starlink-proto::reflection` — `ServerReflectionRequest` with three
-  convenience constructors (`list_services`, `file_containing_symbol`,
-  `file_by_filename`) and the `v1` / `v1alpha` path constants.  (5 unit
-  tests.)
-- `cli/` — still a stub `main` that prints a TODO and exits 2.
+- `starlink-proto::device` — `Request` and ten request-arm sub-messages with
+  convenience constructors (`Request::get_status()`, `…::get_history()`, …)
+  plus the `HANDLE_PATH` `:path` constant.
+- `starlink-proto::reflection` — `ServerReflectionRequest` constructors.
+- `starlink-proto::response` — `Response` envelope with the `dish_get_status`
+  (2004) and `dish_get_history` (2006) oneof arms and the messages they nest
+  (`DishGetStatusResponse`, `AlignmentStats`, `DishObstructionStats`,
+  `DishGpsStats`, `RouterInfo`, `DishGetHistoryResponse`, `DishOutage`, …),
+  with enum-name helpers.  Tags captured from a fresh reflection dump.
+- `cli/` — working binary.  A hand-rolled prior-knowledge HTTP/2 (h2c) client
+  (`src/h2.rs`, pure `std`, no `tokio`/`hyper`/`tonic`) implements the
+  `Transport` trait.  Commands:
+  - `starlink status` — identity, link rates, latency/drop, obstruction,
+    alignment summary, GPS, mesh-node count.
+  - `starlink align` — current vs desired boresight and the azimuth/elevation
+    correction to physically aim the dish.
+  - `starlink history [--samples N]` — min/avg/max/p95 over the 900-sample
+    ring buffers for latency, ping-drop, downlink/uplink throughput, and
+    power draw, plus buffered outages.
+  - `starlink devices` (alias `nodes`) — downstream routers / mesh nodes with
+    role and last-seen age.
 
 ## Roadmap
 
-1. **Response decoders.**  Add prost-derived response types for the arms
-   we actually read (`DishGetStatusResponse`, `DishGetHistoryResponse`,
-   `DishGetObstructionMapResponse`, `GetDeviceInfoResponse`,
-   `GetDiagnosticsResponse`) and a `Response` envelope with the oneof arms
-   we care about.  Blocked on capturing the `Response` oneof tag numbers
-   from a live reflection dump.
-2. **HTTP/2 transport.**  Implement a minimal single-stream HTTP/2 client
-   on top of a `rustix` TCP socket, behind the existing `Transport` trait.
-   Only unary (and single-message bidi for reflection) needs to work.
-3. **Executor.**  Wire `embassy-executor` into `cli/` as the async runtime.
-4. **CLI subcommands.**  Flesh out `starlink status`, `starlink history`,
-   `starlink device-info`, `starlink diagnostics`,
-   `starlink obstruction-map`, `starlink reflect list`,
-   `starlink reflect dump <file>`.
-5. **Flip `cli/` to `#![no_std]`.**  The CLI binary is the last `std`
-   consumer — once the transport is wired up we can drop the standard
+1. **More arms.**  `get_device_info`, `get_diagnostics` (location, hardware
+   self-test), `dish_get_obstruction_map`, and `reflect list` / `reflect
+   dump <file>` on top of the existing `reflection` request types.
+2. **`rustix` transport.**  Swap `src/h2.rs`'s `std::net::TcpStream` for a
+   `rustix` socket behind the same `Transport` trait; the framing and the
+   HTTP/2 logic stay as-is.
+3. **Executor.**  Replace the synchronous `block_on` with `embassy-executor`
+   once the transport is genuinely async.
+4. **Flip `cli/` to `#![no_std]`.**  The CLI binary is the last `std`
+   consumer — once the transport and executor land we can drop the standard
    library entirely, paving the way for the embedded port.
 
 ## Why not just use `tonic`?
