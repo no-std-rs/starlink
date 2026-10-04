@@ -50,7 +50,7 @@ pub struct Request {
     /// The oneof arm identifying which operation this request carries.
     #[prost(
         oneof = "request::Body",
-        tags = "1001, 1004, 1006, 1007, 1008, 1009, 1017, 1022, 2008, 3002, 3015, 6000"
+        tags = "1001, 1004, 1006, 1007, 1008, 1009, 1015, 1016, 1017, 1022, 1023, 1036, 1037, 2003, 2008, 2011, 3002, 3007, 3015, 4003, 4004, 6000, 7000"
     )]
     pub body: Option<request::Body>,
 }
@@ -129,6 +129,89 @@ impl Request {
         Self::new(request::Body::GetDiagnostics(GetDiagnosticsRequest {}))
     }
 
+    /// `Request { get_network_interfaces: GetNetworkInterfacesRequest{} }`.
+    #[must_use]
+    pub fn get_network_interfaces() -> Self {
+        Self::new(request::Body::GetNetworkInterfaces(
+            GetNetworkInterfacesRequest {},
+        ))
+    }
+
+    /// `Request { ping_host: { address } }`.
+    ///
+    /// Asks the dish to ping `address` and report latency/loss.  A safe
+    /// read-only diagnostic, though technically it makes the dish act.
+    #[must_use]
+    pub fn ping_host(address: impl Into<String>) -> Self {
+        Self::new(request::Body::PingHost(PingHostRequest {
+            address: address.into(),
+        }))
+    }
+
+    /// `Request { get_connections: GetConnectionsRequest{} }`.
+    #[must_use]
+    pub fn get_connections() -> Self {
+        Self::new(request::Body::GetConnections(GetConnectionsRequest {}))
+    }
+
+    /// `Request { get_radio_stats: GetRadioStatsRequest{} }`.
+    #[must_use]
+    pub fn get_radio_stats() -> Self {
+        Self::new(request::Body::GetRadioStats(GetRadioStatsRequest {}))
+    }
+
+    /// `Request { time: GetTimeRequest{} }`.
+    #[must_use]
+    pub fn get_time() -> Self {
+        Self::new(request::Body::GetTime(GetTimeRequest {}))
+    }
+
+    /// `Request { dish_get_context: DishGetContextRequest{} }`.
+    #[must_use]
+    pub fn dish_get_context() -> Self {
+        Self::new(request::Body::DishGetContext(DishGetContextRequest {}))
+    }
+
+    /// `Request { dish_get_config: DishGetConfigRequest{} }`.
+    #[must_use]
+    pub fn dish_get_config() -> Self {
+        Self::new(request::Body::DishGetConfig(DishGetConfigRequest {}))
+    }
+
+    /// `Request { transceiver_get_status: TransceiverGetStatusRequest{} }`.
+    #[must_use]
+    pub fn transceiver_get_status() -> Self {
+        Self::new(request::Body::TransceiverGetStatus(
+            TransceiverGetStatusRequest {},
+        ))
+    }
+
+    /// `Request { transceiver_get_telemetry: TransceiverGetTelemetryRequest{} }`.
+    #[must_use]
+    pub fn transceiver_get_telemetry() -> Self {
+        Self::new(request::Body::TransceiverGetTelemetry(
+            TransceiverGetTelemetryRequest {},
+        ))
+    }
+
+    /// `Request { get_gnss_measurement: GetGnssMeasurementRequest{} }`.
+    #[must_use]
+    pub fn get_gnss_measurement() -> Self {
+        Self::new(request::Body::GetGnssMeasurement(
+            GetGnssMeasurementRequest {},
+        ))
+    }
+
+    /// `Request { wifi_get_ping_metrics: WifiGetPingMetricsRequest{} }`.
+    ///
+    /// Router endpoint.  Often `PermissionDenied` without authentication.
+    #[must_use]
+    pub fn wifi_get_ping_metrics() -> Self {
+        Self::new(request::Body::WifiGetPingMetrics(
+            WifiGetPingMetricsRequest {},
+        ))
+    }
+
     /// `Request { wifi_get_clients: WifiGetClientsRequest{} }`.
     ///
     /// Served by the **router** endpoint (e.g. `192.168.1.1:9000`), not the
@@ -190,21 +273,54 @@ pub mod request {
         /// `get_location = 1017`.
         #[prost(message, tag = "1017")]
         GetLocation(super::GetLocationRequest),
+        /// `get_network_interfaces = 1015`.
+        #[prost(message, tag = "1015")]
+        GetNetworkInterfaces(super::GetNetworkInterfacesRequest),
+        /// `ping_host = 1016`.
+        #[prost(message, tag = "1016")]
+        PingHost(super::PingHostRequest),
         /// `get_persistent_stats = 1022`.
         #[prost(message, tag = "1022")]
         GetPersistentStats(super::GetPersistentStatsRequest),
+        /// `get_connections = 1023`.
+        #[prost(message, tag = "1023")]
+        GetConnections(super::GetConnectionsRequest),
+        /// `get_radio_stats = 1036`.
+        #[prost(message, tag = "1036")]
+        GetRadioStats(super::GetRadioStatsRequest),
+        /// `time = 1037`.
+        #[prost(message, tag = "1037")]
+        GetTime(super::GetTimeRequest),
+        /// `dish_get_context = 2003`.
+        #[prost(message, tag = "2003")]
+        DishGetContext(super::DishGetContextRequest),
         /// `dish_get_obstruction_map = 2008`.
         #[prost(message, tag = "2008")]
         DishGetObstructionMap(super::DishGetObstructionMapRequest),
+        /// `dish_get_config = 2011`.
+        #[prost(message, tag = "2011")]
+        DishGetConfig(super::DishGetConfigRequest),
         /// `wifi_get_clients = 3002`.
         #[prost(message, tag = "3002")]
         WifiGetClients(super::WifiGetClientsRequest),
+        /// `wifi_get_ping_metrics = 3007`.
+        #[prost(message, tag = "3007")]
+        WifiGetPingMetrics(super::WifiGetPingMetricsRequest),
         /// `wifi_get_client_history = 3015`.
         #[prost(message, tag = "3015")]
         WifiGetClientHistory(super::WifiGetClientHistoryRequest),
+        /// `transceiver_get_status = 4003`.
+        #[prost(message, tag = "4003")]
+        TransceiverGetStatus(super::TransceiverGetStatusRequest),
+        /// `transceiver_get_telemetry = 4004`.
+        #[prost(message, tag = "4004")]
+        TransceiverGetTelemetry(super::TransceiverGetTelemetryRequest),
         /// `get_diagnostics = 6000`.
         #[prost(message, tag = "6000")]
         GetDiagnostics(super::GetDiagnosticsRequest),
+        /// `get_gnss_measurement = 7000`.
+        #[prost(message, tag = "7000")]
+        GetGnssMeasurement(super::GetGnssMeasurementRequest),
     }
 }
 
@@ -247,6 +363,54 @@ pub struct DishGetObstructionMapRequest {}
 /// `SpaceX.API.Device.GetDiagnosticsRequest` — empty message.
 #[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
 pub struct GetDiagnosticsRequest {}
+
+/// `SpaceX.API.Device.GetNetworkInterfacesRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct GetNetworkInterfacesRequest {}
+
+/// `SpaceX.API.Device.PingHostRequest` — ask the dish to ping a host.
+#[derive(Clone, PartialEq, Eq, ::prost::Message)]
+pub struct PingHostRequest {
+    /// Host or IP address to ping.
+    #[prost(string, tag = "1")]
+    pub address: String,
+}
+
+/// `SpaceX.API.Device.GetConnectionsRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct GetConnectionsRequest {}
+
+/// `SpaceX.API.Device.GetRadioStatsRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct GetRadioStatsRequest {}
+
+/// `SpaceX.API.Device.GetTimeRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct GetTimeRequest {}
+
+/// `SpaceX.API.Device.DishGetContextRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct DishGetContextRequest {}
+
+/// `SpaceX.API.Device.DishGetConfigRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct DishGetConfigRequest {}
+
+/// `SpaceX.API.Device.TransceiverGetStatusRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct TransceiverGetStatusRequest {}
+
+/// `SpaceX.API.Device.TransceiverGetTelemetryRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct TransceiverGetTelemetryRequest {}
+
+/// `SpaceX.API.Device.GetGnssMeasurementRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct GetGnssMeasurementRequest {}
+
+/// `SpaceX.API.Device.WifiGetPingMetricsRequest` — empty message.
+#[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
+pub struct WifiGetPingMetricsRequest {}
 
 /// `SpaceX.API.Device.WifiGetClientsRequest` — empty message.
 #[derive(Clone, Copy, PartialEq, Eq, ::prost::Message)]
@@ -315,7 +479,7 @@ mod tests {
     /// convenience method and the oneof declaration.
     #[test]
     fn every_constructor_round_trips() {
-        let cases: [Request; 12] = [
+        let cases = [
             Request::reboot(),
             Request::get_status(),
             Request::get_next_id(),
@@ -328,6 +492,17 @@ mod tests {
             Request::wifi_get_clients(),
             Request::wifi_get_client_history(1_582_731_053),
             Request::get_diagnostics(),
+            Request::get_network_interfaces(),
+            Request::ping_host("1.1.1.1"),
+            Request::get_connections(),
+            Request::get_radio_stats(),
+            Request::get_time(),
+            Request::dish_get_context(),
+            Request::dish_get_config(),
+            Request::transceiver_get_status(),
+            Request::transceiver_get_telemetry(),
+            Request::get_gnss_measurement(),
+            Request::wifi_get_ping_metrics(),
         ];
         for original in cases {
             let bytes = original.encode_to_vec();

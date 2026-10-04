@@ -28,7 +28,7 @@
 
 use core::future::Future;
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use starlink_core::Transport;
@@ -43,11 +43,23 @@ const FRAME_RST_STREAM: u8 = 0x3;
 const FRAME_SETTINGS: u8 = 0x4;
 const FRAME_PING: u8 = 0x6;
 const FRAME_GOAWAY: u8 = 0x7;
+const FRAME_WINDOW_UPDATE: u8 = 0x8;
 
 // Frame flags (meaning varies by frame type).
 const FLAG_ACK: u8 = 0x1; // SETTINGS, PING
 const FLAG_END_STREAM: u8 = 0x1; // DATA, HEADERS
 const FLAG_END_HEADERS: u8 = 0x4; // HEADERS
+
+/// `SETTINGS_INITIAL_WINDOW_SIZE` identifier (RFC 9113 §6.5.2).
+const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x4;
+
+/// Flow-control window we advertise, for both the per-stream initial window
+/// (via `SETTINGS`) and the connection-level window (via a stream-0
+/// `WINDOW_UPDATE`).  The default 65535-byte window is fine for a `get_status`
+/// reply but far too small for `wifi_get_history`, whose ring buffers run to
+/// hundreds of kilobytes; 32 MiB comfortably holds any single reply so we never
+/// have to dribble out per-frame updates.
+const FLOW_WINDOW: u32 = 32 * 1024 * 1024;
 
 /// Errors raised while driving the HTTP/2 connection.
 #[derive(Debug)]
@@ -58,6 +70,11 @@ pub(crate) enum H2Error {
     Reset(u32),
     /// The peer sent `GOAWAY` with the given error code.
     GoAway(u32),
+    /// The RPC completed with a non-OK `grpc-status` in its trailers.  This is
+    /// how the dish reports e.g. `Unimplemented` (the arm exists in the schema
+    /// but not in this firmware) or `PermissionDenied` (the arm needs
+    /// authentication) — the stream closes cleanly with no `DATA`.
+    Grpc(i32),
 }
 
 impl From<io::Error> for H2Error {
@@ -72,8 +89,117 @@ impl core::fmt::Display for H2Error {
             H2Error::Io(e) => write!(f, "http/2 I/O error: {e}"),
             H2Error::Reset(code) => write!(f, "stream reset by dish (error code {code})"),
             H2Error::GoAway(code) => write!(f, "connection closed by dish (GOAWAY code {code})"),
+            H2Error::Grpc(code) => write!(
+                f,
+                "dish refused the call: grpc-status {code} ({})",
+                grpc_status_name(*code)
+            ),
         }
     }
+}
+
+/// Map a gRPC status code to its canonical name (subset of the codes the dish
+/// actually returns; see <https://grpc.io/docs/guides/status-codes/>).
+fn grpc_status_name(code: i32) -> &'static str {
+    match code {
+        0 => "OK",
+        1 => "CANCELLED",
+        3 => "INVALID_ARGUMENT",
+        4 => "DEADLINE_EXCEEDED",
+        5 => "NOT_FOUND",
+        6 => "ALREADY_EXISTS",
+        7 => "PERMISSION_DENIED",
+        8 => "RESOURCE_EXHAUSTED",
+        9 => "FAILED_PRECONDITION",
+        12 => "UNIMPLEMENTED",
+        13 => "INTERNAL",
+        14 => "UNAVAILABLE",
+        16 => "UNAUTHENTICATED",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Extract a non-OK `grpc-status` from a gRPC trailers HEADERS block.
+///
+/// We do a *structural* HPACK walk (RFC 7541) without a Huffman decoder: every
+/// field is length-delimited so we can skip Huffman-coded names/values we do
+/// not care about.  grpc-go always sends the `grpc-status` *value* as a plain
+/// (non-Huffman) ASCII integer, so the trailer header whose value is a literal
+/// run of digits is `grpc-status` — that is all we need to surface the error.
+/// Returns `None` if the block carries no such header (e.g. `grpc-status: 0`
+/// referenced from the dynamic table on a healthy reply, which we treat as OK).
+fn grpc_status_from_trailers(block: &[u8]) -> Option<i32> {
+    let mut i = 0usize;
+    // Read an HPACK integer with the given prefix width, advancing `i`.
+    let read_int = |i: &mut usize, prefix_bits: u32| -> Option<u64> {
+        let mask = (1u64 << prefix_bits) - 1;
+        let mut v = u64::from(*block.get(*i)?) & mask;
+        *i += 1;
+        if v < mask {
+            return Some(v);
+        }
+        let mut shift = 0u32;
+        loop {
+            let c = u64::from(*block.get(*i)?);
+            *i += 1;
+            v += (c & 0x7f) << shift;
+            shift += 7;
+            if c & 0x80 == 0 {
+                return Some(v);
+            }
+        }
+    };
+    // Read an HPACK string: (Huffman flag, bytes).  Advances `i`.
+    let read_str = |i: &mut usize| -> Option<(bool, &[u8])> {
+        let huff = block.get(*i)? & 0x80 != 0;
+        let len = read_int(i, 7)? as usize;
+        let end = i.checked_add(len)?;
+        let s = block.get(*i..end)?;
+        *i = end;
+        Some((huff, s))
+    };
+    while i < block.len() {
+        let first = block[i];
+        if first & 0x80 != 0 {
+            // Indexed header field — no value bytes follow.
+            read_int(&mut i, 7)?;
+        } else if first & 0x40 != 0 {
+            // Literal with incremental indexing, 6-bit name index.
+            let idx = read_int(&mut i, 6)?;
+            if idx == 0 {
+                read_str(&mut i)?; // literal name
+            }
+            if let (false, val) = read_str(&mut i)? {
+                if let Some(code) = parse_ascii_status(val) {
+                    return Some(code);
+                }
+            }
+        } else if first & 0x20 != 0 {
+            // Dynamic table size update — no value.
+            read_int(&mut i, 5)?;
+        } else {
+            // Literal without (0x00) / never (0x10) indexing, 4-bit name index.
+            let idx = read_int(&mut i, 4)?;
+            if idx == 0 {
+                read_str(&mut i)?;
+            }
+            if let (false, val) = read_str(&mut i)? {
+                if let Some(code) = parse_ascii_status(val) {
+                    return Some(code);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse a non-empty all-ASCII-digit byte slice as an `i32`; reject anything
+/// else (so we only ever match the numeric `grpc-status` value).
+fn parse_ascii_status(val: &[u8]) -> Option<i32> {
+    if val.is_empty() || !val.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    core::str::from_utf8(val).ok()?.parse::<i32>().ok()
 }
 
 /// A single TCP/HTTP-2 connection to the dish.
@@ -88,7 +214,13 @@ impl H2Transport {
     /// Connect to `addr` (`host:port`), send the preface, and advertise our
     /// (empty) `SETTINGS`.  `addr` doubles as the `:authority` header value.
     pub(crate) fn connect(addr: &str) -> Result<Self, H2Error> {
-        let stream = TcpStream::connect(addr)?;
+        // Resolve and connect with a bounded timeout so an unreachable host
+        // fails fast instead of blocking on the OS default (~2 min on Linux).
+        let sockaddr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "could not resolve address"))?;
+        let stream = TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.set_nodelay(true)?;
         let mut t = Self {
@@ -97,8 +229,21 @@ impl H2Transport {
             next_stream_id: 1,
         };
         t.stream.write_all(PREFACE)?;
-        // Empty SETTINGS frame on the control stream (id 0).
-        write_frame(&mut t.stream, FRAME_SETTINGS, 0, 0, &[])?;
+        // SETTINGS advertising a large per-stream initial window so big replies
+        // (e.g. wifi_get_history) are not capped at the 65535-byte default.
+        let mut settings = Vec::with_capacity(6);
+        settings.extend_from_slice(&SETTINGS_INITIAL_WINDOW_SIZE.to_be_bytes());
+        settings.extend_from_slice(&FLOW_WINDOW.to_be_bytes());
+        write_frame(&mut t.stream, FRAME_SETTINGS, 0, 0, &settings)?;
+        // Raise the *connection*-level window too (SETTINGS only governs
+        // per-stream windows): a WINDOW_UPDATE on stream 0 bumps it.
+        write_frame(
+            &mut t.stream,
+            FRAME_WINDOW_UPDATE,
+            0,
+            0,
+            &FLOW_WINDOW.to_be_bytes(),
+        )?;
         t.stream.flush()?;
         Ok(t)
     }
@@ -156,13 +301,21 @@ impl H2Transport {
                         break;
                     }
                 }
-                // Trailers (or trailers-only) that close our stream.  We never
-                // decode response header blocks; a HEADERS frame on our stream
-                // without END_STREAM is the initial response headers and is
-                // ignored by the catch-all below.
+                // Trailers (or trailers-only) that close our stream.  A
+                // HEADERS frame on our stream *without* END_STREAM is the
+                // initial response headers and is ignored by the catch-all
+                // below; one *with* END_STREAM carries the gRPC trailers,
+                // including `grpc-status`.  A non-OK status means the call
+                // failed (e.g. Unimplemented / PermissionDenied) — surface it
+                // rather than returning an empty body that fails to unframe.
                 FRAME_HEADERS
                     if frame.stream_id == stream_id && frame.flags & FLAG_END_STREAM != 0 =>
                 {
+                    if let Some(code) = grpc_status_from_trailers(&frame.payload) {
+                        if code != 0 {
+                            return Err(H2Error::Grpc(code));
+                        }
+                    }
                     break;
                 }
                 FRAME_RST_STREAM if frame.stream_id == stream_id => {
@@ -327,6 +480,29 @@ mod tests {
         let mut out = Vec::new();
         hpack_int(&mut out, 1337, 5, 0x00);
         assert_eq!(out, vec![31, 154, 10]);
+    }
+
+    #[test]
+    fn grpc_status_parsed_from_real_permission_denied_trailers() {
+        // Captured trailers-only HEADERS payload from a real get_location call
+        // that the dish rejected with PermissionDenied (grpc-status 7): the
+        // block is `:status 200`, a Huffman `content-type`, then Huffman names
+        // for `grpc-status`/`grpc-message` with a literal `"7"` status value.
+        let block = [
+            0x88, 0x5f, 0x8b, 0x1d, 0x75, 0xd0, 0x62, 0x0d, 0x26, 0x3d, 0x4c, 0x4d, 0x65, 0x64,
+            0x40, 0x88, 0x9a, 0xca, 0xc8, 0xb2, 0x12, 0x34, 0xda, 0x8f, 0x01, 0x37, 0x40, 0x89,
+            0x9a, 0xca, 0xc8, 0xb5, 0x25, 0x42, 0x07, 0x31, 0x7f, 0xa1, 0xc2, 0x33, 0x50, 0x59,
+            0x14, 0x49, 0xd4, 0x98, 0xa9, 0x52, 0x83, 0x90, 0x69, 0x31, 0xea, 0xb8, 0xa5, 0xf3,
+            0x20, 0x71, 0xd0, 0x59, 0x14, 0x92, 0xd2, 0xa8, 0x93, 0xa9, 0x59, 0xe8, 0x31, 0x3d,
+            0x7f,
+        ];
+        assert_eq!(grpc_status_from_trailers(&block), Some(7));
+    }
+
+    #[test]
+    fn grpc_status_ignores_indexed_only_block() {
+        // `:status 200` indexed (0x88) with no literal numeric value present.
+        assert_eq!(grpc_status_from_trailers(&[0x88]), None);
     }
 
     #[test]

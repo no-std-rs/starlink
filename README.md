@@ -66,55 +66,55 @@ need, because we know the exact set of request arms we plan to send.
 
 ## Status
 
-**v0.3 — end-to-end reads off a live dish.**  Workspace compiles clean,
-clippy-pedantic green, 28 unit tests + 1 doc-test passing.  Verified against
-a Starlink Mini (`mini1_prod2`, firmware `2026.06.15.mr81291`): every value
-the CLI prints matches `grpcurl` captured in the same instant.
+**v0.4 — broad read coverage off a live dish + router.**  Workspace compiles
+clean, clippy-pedantic green, 41 unit tests + 1 doc-test passing.  Verified
+against a Starlink Mini (`mini1_prod2`, firmware `2026.06.15.mr81291`) and its
+router: every value the CLI prints matches `grpcurl` captured in the same
+instant, and every arm the firmware does not serve is reported with the dish's
+own `grpc-status` (e.g. `UNIMPLEMENTED`, `PERMISSION_DENIED`).
 
 - `starlink-core::{frame, unframe, Transport, FrameError}` — gRPC
   length-prefix framing and the transport trait.  Still zero-dep.
-- `starlink-proto::device` — `Request` and ten request-arm sub-messages with
-  convenience constructors (`Request::get_status()`, `…::get_history()`, …)
-  plus the `HANDLE_PATH` `:path` constant.
+- `starlink-proto::device` — `Request` with convenience constructors for ~20
+  read arms (`get_status`, `get_history`, `dish_get_obstruction_map`,
+  `get_diagnostics`, `dish_get_config`, `get_gnss_measurement`,
+  `transceiver_get_status`, …) plus the `HANDLE_PATH` `:path` constant.
 - `starlink-proto::reflection` — `ServerReflectionRequest` constructors.
-- `starlink-proto::response` — `Response` envelope with the `dish_get_status`
-  (2004) and `dish_get_history` (2006) oneof arms and the messages they nest
-  (`DishGetStatusResponse`, `AlignmentStats`, `DishObstructionStats`,
-  `DishGpsStats`, `RouterInfo`, `DishGetHistoryResponse`, `DishOutage`, …),
-  with enum-name helpers.  Tags captured from a fresh reflection dump.
+- `starlink-proto::response` — `Response` envelope with ~22 oneof arms and the
+  messages they nest (dish status/history/obstruction-map/diagnostics/config,
+  Wi-Fi status/history/ping-metrics/clients, radio stats, GNSS, transceiver, …),
+  each modelled as a decode subset with enum-name helpers.  Tags captured from
+  a fresh reflection dump.
 - `cli/` — working binary.  A hand-rolled prior-knowledge HTTP/2 (h2c) client
   (`src/h2.rs`, pure `std`, no `tokio`/`hyper`/`tonic`) implements the
-  `Transport` trait.  Commands:
-  - `starlink status` — identity, link rates, latency/drop, obstruction,
-    alignment summary, GPS, mesh-node count.
-  - `starlink align` — current vs desired boresight and the azimuth/elevation
-    correction to physically aim the dish.
-  - `starlink history [--samples N]` — min/avg/max/p95 over the 900-sample
-    ring buffers for latency, ping-drop, downlink/uplink throughput, and
-    power draw, plus buffered outages.
-  - `starlink devices` (alias `nodes`) — downstream routers / mesh nodes with
-    role and last-seen age.
-  - `starlink clients` — **router** endpoint (`192.168.1.1:9000`, the LAN
-    gateway, not the dish): attached Wi-Fi/Ethernet clients with interface,
-    role, signal/SNR, PHY rates, byte counters, and mesh hop count.  The dish
-    endpoint returns `Unimplemented` for client enumeration; the router serves
-    it via the `wifi_get_clients` arm.
-  - `starlink client-history [--samples N]` — router endpoint: per-client
-    download/upload throughput history (min/avg/max/p95 over each client's
-    900-sample ring buffer).  Enumerates clients, then fetches
-    `wifi_get_client_history` for each one with a `client_id`.
+  `Transport` trait.  It advertises a 32 MiB flow-control window so large
+  replies (`wifi-history`'s ~350 KB of ring buffers) are not capped at the
+  65535-byte default, and it structurally HPACK-parses the gRPC trailers to
+  surface a non-OK `grpc-status` as a clean error.  Commands (dish endpoint
+  unless noted):
+  - `status` / `align` / `history` / `devices` — link, aiming, ring-buffer
+    history, downstream mesh nodes.
+  - `obstruction-map [--width N]` — downsamples the `dish_get_obstruction_map`
+    grid and **draws it** as a shaded sky-view picture.
+  - `diagnostics`, `device-info`, `dish-config`, `dish-context`, `location`,
+    `gnss`, `time`, `ping`, `ping-host <HOST>`, `connections`, `interfaces`,
+    `transceiver`, `transceiver-telemetry` — one read arm each.
+  - `clients` / `client-history` — **router** endpoint (`192.168.1.1:9000`):
+    attached Wi-Fi/Ethernet clients and per-client throughput history.
+  - `wifi-status` / `wifi-history` — router endpoint: WAN address,
+    dish/PoP/internet ping, alerts, and the multi-target (PoP/Google/Cloudflare
+    × IPv4/IPv6) ping-drop history.
+  - `ping-metrics` / `radio-stats` — router endpoint: internet ping metrics and
+    per-band Wi-Fi radio thermal/antenna stats.
 
 ## Roadmap
 
-1. **More arms.**  `get_device_info`, `get_diagnostics` (location, hardware
-   self-test), `dish_get_obstruction_map`, and `reflect list` / `reflect
-   dump <file>` on top of the existing `reflection` request types.
-2. **`rustix` transport.**  Swap `src/h2.rs`'s `std::net::TcpStream` for a
+1. **`rustix` transport.**  Swap `src/h2.rs`'s `std::net::TcpStream` for a
    `rustix` socket behind the same `Transport` trait; the framing and the
    HTTP/2 logic stay as-is.
-3. **Executor.**  Replace the synchronous `block_on` with `embassy-executor`
+2. **Executor.**  Replace the synchronous `block_on` with `embassy-executor`
    once the transport is genuinely async.
-4. **Flip `cli/` to `#![no_std]`.**  The CLI binary is the last `std`
+3. **Flip `cli/` to `#![no_std]`.**  The CLI binary is the last `std`
    consumer — once the transport and executor land we can drop the standard
    library entirely, paving the way for the embedded port.
 

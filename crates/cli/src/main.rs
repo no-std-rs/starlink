@@ -5,14 +5,23 @@
 //! `tonic`: the binary is `std` today but everything it leans on has a
 //! `no_std` path so the embedded port stays open.
 //!
-//! Commands:
+//! Commands fall into two groups by endpoint.  Dish commands (default
+//! `192.168.100.1:9200`): `status`, `align`, `history`, `devices`,
+//! `obstruction-map` (draws the sky-view grid), `diagnostics`, `device-info`,
+//! `location`, `gnss`, `dish-config`, `dish-context`, `time`, `ping`,
+//! `ping-host`, `connections`, `interfaces`, `transceiver`,
+//! `transceiver-telemetry`.  Router commands (default `192.168.1.1:9000`):
+//! `clients`, `client-history`, `wifi-status`, `wifi-history`, `ping-metrics`,
+//! `radio-stats`.  Run `starlink help` for the full list.
+//!
+//! Many arms exist in the schema but are `Unimplemented` or `PermissionDenied`
+//! on a given firmware/hardware; the dish reports which through the gRPC
+//! trailer `grpc-status`, which [`h2`] surfaces as a clean error.
 //!
 //! ```text
-//! starlink status   [--addr HOST:PORT]      # identity, link, obstruction, alignment, nodes
-//! starlink align    [--addr HOST:PORT]      # how to aim the dish (current vs desired boresight)
-//! starlink history  [--addr HOST:PORT] [--samples N]   # latency / throughput / power / outages
-//! starlink devices  [--addr HOST:PORT]      # downstream routers / mesh nodes
-//! starlink clients  [--addr HOST:PORT]      # router endpoint: attached Wi-Fi/Ethernet clients
+//! starlink status            [--addr HOST:PORT]
+//! starlink obstruction-map   [--addr HOST:PORT] [--width N]
+//! starlink wifi-status       [--addr HOST:PORT]
 //! ```
 
 // These fire throughout the human-readable formatting below (seconds as
@@ -35,9 +44,13 @@ use prost::Message;
 use starlink_core::{frame, unframe, Transport};
 use starlink_proto::device::{Request, HANDLE_PATH};
 use starlink_proto::response::{
-    attitude_estimation_state_name, has_actuators_name, outage_cause_name, response::Body,
-    router_role_name, wifi_interface_name, wifi_role_name, DishGetHistoryResponse,
-    DishGetStatusResponse, Response, WifiGetClientHistoryResponse, WifiGetClientsResponse,
+    attitude_estimation_state_name, disablement_code_name, dish_state_name, gnss_system_name,
+    has_actuators_name, outage_cause_name, position_source_name, response::Body, router_role_name,
+    test_result_name, transceiver_state_name, wifi_interface_name, wifi_role_name,
+    DishGetConfigResponse, DishGetDiagnosticsResponse, DishGetHistoryResponse,
+    DishGetObstructionMapResponse, DishGetStatusResponse, GetDeviceInfoResponse,
+    GetNetworkInterfacesResponse, GetRadioStatsResponse, PingHostResponse, Response,
+    WifiGetClientHistoryResponse, WifiGetClientsResponse, WifiGetPingMetricsResponse,
 };
 
 /// Default dish endpoint on the standard Starlink management subnet.
@@ -50,8 +63,18 @@ fn main() -> ExitCode {
     let rest = &args[args.len().min(2)..];
     let cmd = args.get(1).map(String::as_str);
 
-    // `clients` / `client-history` talk to the router; the rest to the dish.
-    let default_addr = if matches!(cmd, Some("clients" | "client-history")) {
+    // Router-served commands default to the LAN gateway; the rest to the dish.
+    let default_addr = if matches!(
+        cmd,
+        Some(
+            "clients"
+                | "client-history"
+                | "wifi-status"
+                | "wifi-history"
+                | "ping-metrics"
+                | "radio-stats"
+        )
+    ) {
         ROUTER_ADDR
     } else {
         DISH_ADDR
@@ -75,6 +98,37 @@ fn main() -> ExitCode {
                 .unwrap_or(900);
             cmd_client_history(&addr, samples)
         }
+        Some("obstruction-map" | "obstructions") => {
+            let width = parse_opt(rest, "--width")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(60);
+            cmd_obstruction_map(&addr, width)
+        }
+        Some("diagnostics" | "diag") => cmd_diagnostics(&addr),
+        Some("device-info") => cmd_device_info(&addr),
+        Some("location") => cmd_location(&addr),
+        Some("gnss") => cmd_gnss(&addr),
+        Some("dish-config") => cmd_dish_config(&addr),
+        Some("dish-context") => cmd_dish_context(&addr),
+        Some("time") => cmd_time(&addr),
+        Some("ping") => cmd_ping(&addr),
+        Some("ping-host") => match rest.iter().find(|a| !a.starts_with('-')) {
+            Some(host) => cmd_ping_host(&addr, host),
+            None => Err("usage: starlink ping-host <HOST> [--addr HOST:PORT]".to_string()),
+        },
+        Some("connections") => cmd_connections(&addr),
+        Some("interfaces") => cmd_interfaces(&addr),
+        Some("transceiver") => cmd_transceiver(&addr),
+        Some("transceiver-telemetry") => cmd_transceiver_telemetry(&addr),
+        Some("wifi-status") => cmd_wifi_status(&addr),
+        Some("wifi-history") => {
+            let samples = parse_opt(rest, "--samples")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(900);
+            cmd_wifi_history(&addr, samples)
+        }
+        Some("ping-metrics") => cmd_ping_metrics(&addr),
+        Some("radio-stats") => cmd_radio_stats(&addr),
         Some("-h" | "--help" | "help") => {
             print_usage();
             return ExitCode::SUCCESS;
@@ -102,12 +156,33 @@ fn print_usage() {
     eprintln!("  align               how to aim the dish (current vs desired boresight)");
     eprintln!("  history [--samples N]   latency / throughput / power / outage history");
     eprintln!("  devices             downstream routers / mesh nodes");
+    eprintln!("  obstruction-map [--width N]   draw the sky-view obstruction map");
+    eprintln!("  diagnostics         alerts, self-test, disablement, alignment");
+    eprintln!("  device-info         hardware / software identity");
+    eprintln!("  location            GPS position (needs owner opt-in)");
+    eprintln!("  gnss                raw per-satellite GNSS measurements");
+    eprintln!("  dish-config         configured power-save / snow-melt / level mode");
+    eprintln!("  dish-context        cell / PoP / beam / obstruction context");
+    eprintln!("  time                dish wall-clock time");
+    eprintln!("  ping                PoP / gateway ping results");
+    eprintln!("  ping-host <HOST>    ask the dish to ping a host");
+    eprintln!("  connections         backend service connections");
+    eprintln!("  interfaces          network interface counters");
+    eprintln!("  transceiver         transceiver modulator / temp state");
+    eprintln!("  transceiver-telemetry   antenna attitude / SNR / satellite ids");
     eprintln!();
     eprintln!("commands (router endpoint):");
     eprintln!("  clients             attached Wi-Fi / Ethernet clients and their stats");
     eprintln!("  client-history [--samples N]   per-client download/upload throughput history");
+    eprintln!("  wifi-status         WAN address, dish/PoP/internet ping, alerts");
+    eprintln!("  wifi-history [--samples N]   router ping drop/latency + multi-target history");
+    eprintln!("  ping-metrics        internet ping metrics (needs auth)");
+    eprintln!("  radio-stats         per-band Wi-Fi radio thermal / antenna stats");
     eprintln!();
-    eprintln!("default addr {DISH_ADDR} (dish), {ROUTER_ADDR} (clients)");
+    eprintln!("note: many arms are Unimplemented or PermissionDenied depending on");
+    eprintln!("      firmware / hardware; the dish reports which via grpc-status.");
+    eprintln!();
+    eprintln!("default addr {DISH_ADDR} (dish), {ROUTER_ADDR} (router commands)");
 }
 
 /// Pull `--name VALUE` out of `args`, if present.
@@ -561,6 +636,686 @@ fn cmd_client_history(addr: &str, samples: usize) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// obstruction-map (dish) — draw the sky-view obstruction grid
+// ---------------------------------------------------------------------------
+
+fn obstruction_map(response: &Response) -> Result<&DishGetObstructionMapResponse, String> {
+    match &response.body {
+        Some(Body::DishGetObstructionMap(m)) => Ok(m),
+        _ => Err(status_or("response carried no dish_get_obstruction_map arm", response)),
+    }
+}
+
+fn cmd_obstruction_map(addr: &str, width: usize) -> Result<(), String> {
+    let response = fetch(addr, &Request::dish_get_obstruction_map())?;
+    let m = obstruction_map(&response)?;
+
+    let rows = m.num_rows as usize;
+    let cols = m.num_cols as usize;
+    if rows == 0 || cols == 0 || m.snr.len() < rows * cols {
+        return Err(format!(
+            "malformed obstruction map ({rows}x{cols}, {} values)",
+            m.snr.len()
+        ));
+    }
+
+    // A cell is "observed" when its value is >= 0; -1 marks outside the field
+    // of view / not-yet-mapped sky.  For observed cells, value 1.0 is clear
+    // sky and lower values are progressively more obstructed.
+    let (mut observed, mut obstructed) = (0usize, 0usize);
+    for &v in &m.snr {
+        if v >= 0.0 {
+            observed += 1;
+            if v < 0.99 {
+                obstructed += 1;
+            }
+        }
+    }
+
+    println!(
+        "obstruction map:  {rows}x{cols}, {}° radius from boresight ({})",
+        m.max_theta_deg as i32,
+        ref_frame_name(m.map_reference_frame),
+    );
+    println!(
+        "observed sky:     {observed} cells, {obstructed} obstructed ({:.2}%)",
+        if observed == 0 {
+            0.0
+        } else {
+            obstructed as f64 / observed as f64 * 100.0
+        }
+    );
+    println!();
+
+    draw_obstruction_map(&m.snr, rows, cols, width.clamp(20, cols.max(20)));
+
+    println!();
+    println!("legend: ` ` outside FOV   `·` clear   `░▒▓` partial   `█` obstructed");
+    Ok(())
+}
+
+/// Map an `ObstructionMapReferenceFrame` enum value to its name.
+fn ref_frame_name(v: i32) -> &'static str {
+    match v {
+        1 => "FRAME_EARTH (compass-aligned)",
+        2 => "FRAME_UT (dish-aligned)",
+        _ => "FRAME_UNKNOWN",
+    }
+}
+
+/// Downsample the `rows×cols` obstruction grid to `out_w` columns (and a
+/// height that keeps a roughly circular aspect, since terminal cells are about
+/// twice as tall as wide) and print it with a shaded ramp.
+fn draw_obstruction_map(snr: &[f32], rows: usize, cols: usize, out_w: usize) {
+    let scale = cols as f64 / out_w as f64;
+    // Halve the vertical resolution to correct for ~2:1 character aspect.
+    let out_h = ((rows as f64 / scale) * 0.5).round().max(1.0) as usize;
+
+    let mut lines: Vec<String> = Vec::with_capacity(out_h);
+    for oy in 0..out_h {
+        let mut line = String::with_capacity(out_w);
+        for ox in 0..out_w {
+            // The input block this output cell covers.
+            let x0 = (ox as f64 * scale) as usize;
+            let x1 = (((ox + 1) as f64 * scale) as usize).max(x0 + 1).min(cols);
+            let y0 = (oy as f64 * scale * 2.0) as usize;
+            let y1 = (((oy + 1) as f64 * scale * 2.0) as usize).max(y0 + 1).min(rows);
+
+            let (mut sum, mut seen) = (0.0f64, 0usize);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let v = snr[y * cols + x];
+                    if v >= 0.0 {
+                        sum += f64::from(v);
+                        seen += 1;
+                    }
+                }
+            }
+            line.push(if seen == 0 {
+                ' '
+            } else {
+                // obstruction fraction: 0 clear .. 1 fully obstructed
+                shade(1.0 - sum / seen as f64)
+            });
+        }
+        // Trim trailing blanks so the disk isn't boxed by whitespace.
+        lines.push(line.trim_end().to_string());
+    }
+    // Drop fully-blank rows at the top and bottom so the disk sits snug.
+    let first = lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
+    let last = lines.iter().rposition(|l| !l.is_empty()).unwrap_or(0);
+    for line in &lines[first..=last] {
+        println!("{line}");
+    }
+}
+
+/// Pick a glyph for an obstruction fraction in `0.0..=1.0`.
+fn shade(f: f64) -> char {
+    match f {
+        x if x < 0.02 => '·',
+        x if x < 0.25 => '░',
+        x if x < 0.50 => '▒',
+        x if x < 0.80 => '▓',
+        _ => '█',
+    }
+}
+
+// ---------------------------------------------------------------------------
+// diagnostics (dish)
+// ---------------------------------------------------------------------------
+
+fn dish_diagnostics(response: &Response) -> Result<&DishGetDiagnosticsResponse, String> {
+    match &response.body {
+        Some(Body::DishGetDiagnostics(d)) => Ok(d),
+        _ => Err(status_or("response carried no dish_get_diagnostics arm", response)),
+    }
+}
+
+fn cmd_diagnostics(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_diagnostics())?;
+    let d = dish_diagnostics(&response)?;
+
+    println!("device id:        {}", d.id);
+    println!("hardware:         {}", d.hardware_version);
+    println!("software:         {}", d.software_version);
+    println!("disablement:      {}", disablement_code_name(d.disablement_code));
+    println!("hardware self-test: {}", test_result_name(d.hardware_self_test));
+    println!("stowed:           {}", d.stowed);
+    println!("overage limited:  {}", d.overage_rate_limited);
+
+    if let Some(a) = &d.alignment_stats {
+        println!(
+            "alignment:        current az {:.1}° el {:.1}°  desired az {:.1}° el {:.1}°",
+            a.boresight_azimuth_deg,
+            a.boresight_elevation_deg,
+            a.desired_boresight_azimuth_deg,
+            a.desired_boresight_elevation_deg,
+        );
+    }
+    if let Some(l) = &d.location {
+        if l.enabled {
+            println!(
+                "location:         {:.5}, {:.5}  alt {:.0} m",
+                l.latitude, l.longitude, l.altitude_meters
+            );
+        } else {
+            println!("location:         (sharing disabled)");
+        }
+    }
+
+    let alerts = active_diag_alerts(d.alerts.as_ref());
+    if alerts.is_empty() {
+        println!("alerts:           none");
+    } else {
+        println!("alerts:           {}", alerts.join(", "));
+    }
+    Ok(())
+}
+
+/// Collect the names of the diagnostics alert flags that are set.
+fn active_diag_alerts(
+    a: Option<&starlink_proto::response::DiagnosticsAlerts>,
+) -> Vec<&'static str> {
+    let Some(a) = a else { return Vec::new() };
+    let mut out = Vec::new();
+    for (set, name) in [
+        (a.dish_is_heating, "dish_is_heating"),
+        (a.dish_thermal_throttle, "dish_thermal_throttle"),
+        (a.dish_thermal_shutdown, "dish_thermal_shutdown"),
+        (a.power_supply_thermal_throttle, "power_supply_thermal_throttle"),
+        (a.motors_stuck, "motors_stuck"),
+        (a.mast_not_near_vertical, "mast_not_near_vertical"),
+        (a.slow_ethernet_speeds, "slow_ethernet_speeds"),
+        (a.software_install_pending, "software_install_pending"),
+        (a.obstructed, "obstructed"),
+    ] {
+        if set {
+            out.push(name);
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// device-info (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_device_info(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_device_info())?;
+    let Some(Body::GetDeviceInfo(GetDeviceInfoResponse { device_info: Some(di) })) = &response.body else {
+        return Err(status_or("response carried no get_device_info arm", &response));
+    };
+    println!("device id:        {}", di.id);
+    println!("hardware:         {}", di.hardware_version);
+    println!("software:         {}", di.software_version);
+    println!("build id:         {}", di.build_id);
+    println!("country:          {}", di.country_code);
+    println!("utc offset:       {}s", di.utc_offset_s);
+    println!("bootcount:        {}", di.bootcount);
+    println!("generation:       {}", di.generation_number);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// location (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_location(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_location())?;
+    let Some(Body::GetLocation(l)) = &response.body else {
+        return Err(status_or("response carried no get_location arm", &response));
+    };
+    if let Some(p) = &l.lla {
+        println!("position:         {:.6}, {:.6}", p.lat, p.lon);
+        println!("altitude:         {:.1} m", p.alt);
+    }
+    println!("source:           {}", position_source_name(l.source));
+    println!("uncertainty:      ±{:.1} m", l.sigma_m);
+    println!(
+        "speed:            {:.2} m/s horiz, {:.2} m/s vert",
+        l.horizontal_speed_mps, l.vertical_speed_mps
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// gnss (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_gnss(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_gnss_measurement())?;
+    let Some(Body::GetGnssMeasurement(g)) = &response.body else {
+        return Err(status_or("response carried no get_gnss_measurement arm", &response));
+    };
+    println!("device id:        {}", g.device_id);
+    println!("satellites:       {}", g.measurements.len());
+    for mz in &g.measurements {
+        println!(
+            "  {:<8} PRN {:>3}",
+            gnss_system_name(mz.satellite_system),
+            mz.prn
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// dish-config (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_dish_config(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::dish_get_config())?;
+    let Some(Body::DishGetConfig(DishGetConfigResponse { dish_config: Some(c) })) = &response.body else {
+        return Err(status_or("response carried no dish_get_config arm", &response));
+    };
+    println!("snow melt mode:   {}", snow_melt_name(c.snow_melt_mode));
+    println!("level dish mode:  {}", level_dish_name(c.level_dish_mode));
+    println!(
+        "location request: {}",
+        if c.location_request_mode == 1 { "LOCAL" } else { "NONE" }
+    );
+    println!("power save:       {}", if c.power_save_mode { "on" } else { "off" });
+    if c.power_save_mode {
+        println!(
+            "  window:         {} for {} min",
+            minutes_of_day(c.power_save_start_minutes),
+            c.power_save_duration_minutes
+        );
+    }
+    println!(
+        "swupdate defer 3d: {}",
+        if c.swupdate_three_day_deferral_enabled { "on" } else { "off" }
+    );
+    println!("swupdate reboot:  hour {}", c.swupdate_reboot_hour);
+    println!("asset class:      {}", c.asset_class);
+    Ok(())
+}
+
+fn snow_melt_name(v: i32) -> &'static str {
+    match v {
+        1 => "ALWAYS_ON",
+        2 => "ALWAYS_OFF",
+        _ => "AUTO",
+    }
+}
+
+fn level_dish_name(v: i32) -> &'static str {
+    match v {
+        1 => "FORCE_LEVEL",
+        _ => "TILT_LIKE_NORMAL",
+    }
+}
+
+/// Render minutes-past-midnight as `HH:MM`.
+fn minutes_of_day(m: u32) -> String {
+    format!("{:02}:{:02}", m / 60 % 24, m % 60)
+}
+
+// ---------------------------------------------------------------------------
+// dish-context (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_dish_context(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::dish_get_context())?;
+    let Some(Body::DishGetContext(c)) = &response.body else {
+        return Err(status_or("response carried no dish_get_context arm", &response));
+    };
+    println!("cell id:          {}", c.cell_id);
+    println!("pop rack id:      {}", c.pop_rack_id);
+    println!("initial sat:      {}", c.initial_satellite_id);
+    println!("initial gateway:  {}", c.initial_gateway_id);
+    println!("on backup beam:   {}", c.on_backup_beam);
+    println!("slot ends in:     {:.1}s", c.seconds_to_slot_end);
+    println!(
+        "obstruction:      {:.3}% ({:.0}s valid, {:.0}s obstructed)",
+        c.obstruction_fraction * 100.0,
+        c.obstruction_valid_s,
+        c.obstruction_time,
+    );
+    println!(
+        "pop ping (15s):   {:.2} ms, {:.2}% drop",
+        c.pop_ping_latency_ms_15s_mean,
+        c.pop_ping_drop_rate_15s_mean * 100.0,
+    );
+    println!("ku mac active:    {:.1}%", c.ku_mac_active_ratio * 100.0);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// time (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_time(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_time())?;
+    let Some(Body::GetTime(t)) = &response.body else {
+        return Err(status_or("response carried no time arm", &response));
+    };
+    let secs = t.unix_nano / 1_000_000_000;
+    println!("dish time:        {} (unix {secs})", iso_utc(secs));
+    let skew = secs - now_unix_ns() / 1_000_000_000;
+    println!("skew vs host:     {skew:+}s");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ping / ping-host (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_ping(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_ping())?;
+    let Some(Body::GetPing(p)) = &response.body else {
+        return Err(status_or("response carried no get_ping arm", &response));
+    };
+    if p.results.is_empty() {
+        println!("no ping results");
+    }
+    for (target, r) in &p.results {
+        println!(
+            "  {target:<16} {:.2} ms  {:.2}% drop",
+            r.latency_ms,
+            r.drop_rate * 100.0
+        );
+    }
+    Ok(())
+}
+
+fn cmd_ping_host(addr: &str, host: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::ping_host(host))?;
+    let Some(Body::PingHost(PingHostResponse { result: Some(r) })) = &response.body else {
+        return Err(status_or("response carried no ping_host arm", &response));
+    };
+    println!(
+        "{host}: {:.2} ms, {:.2}% drop",
+        r.latency_ms,
+        r.drop_rate * 100.0
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// connections (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_connections(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_connections())?;
+    let Some(Body::GetConnections(c)) = &response.body else {
+        return Err(status_or("response carried no get_connections arm", &response));
+    };
+    if c.services.is_empty() {
+        println!("no service connections");
+    }
+    for (name, svc) in &c.services {
+        println!(
+            "  {name:<24} {}  ({}s since success)",
+            svc.address, svc.seconds_since_success
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// interfaces (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_interfaces(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_network_interfaces())?;
+    let Some(Body::GetNetworkInterfaces(GetNetworkInterfacesResponse {
+        network_interfaces: ifs,
+    })) = &response.body
+    else {
+        return Err(status_or("response carried no get_network_interfaces arm", &response));
+    };
+    if ifs.is_empty() {
+        println!("no network interfaces");
+    }
+    for ni in ifs {
+        println!();
+        println!(
+            "  {:<10} {}  {}",
+            ni.name,
+            if ni.up { "up" } else { "down" },
+            ni.mac_address
+        );
+        if !ni.ipv4_addresses.is_empty() {
+            println!("    ipv4 {}", ni.ipv4_addresses.join(", "));
+        }
+        if !ni.ipv6_addresses.is_empty() {
+            println!("    ipv6 {}", ni.ipv6_addresses.join(", "));
+        }
+        let rx = ni.rx_stats.as_ref().map_or(0, |s| s.bytes);
+        let tx = ni.tx_stats.as_ref().map_or(0, |s| s.bytes);
+        println!("    rx {}  tx {}", human_bytes(rx), human_bytes(tx));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// transceiver / transceiver-telemetry (dish)
+// ---------------------------------------------------------------------------
+
+fn cmd_transceiver(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::transceiver_get_status())?;
+    let Some(Body::TransceiverGetStatus(t)) = &response.body else {
+        return Err(status_or("response carried no transceiver_get_status arm", &response));
+    };
+    println!("dish state:       {}", dish_state_name(t.state));
+    println!("modulator:        {}", transceiver_state_name(t.mod_state));
+    println!("demodulator:      {}", transceiver_state_name(t.demod_state));
+    println!("tx:               {}", transceiver_state_name(t.tx_state));
+    println!("rx:               {}", transceiver_state_name(t.rx_state));
+    println!("modem asic temp:  {:.1} °C", t.modem_asic_temp);
+    println!("tx if temp:       {:.1} °C", t.tx_if_temp);
+    Ok(())
+}
+
+fn cmd_transceiver_telemetry(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::transceiver_get_telemetry())?;
+    let Some(Body::TransceiverGetTelemetry(t)) = &response.body else {
+        return Err(status_or("response carried no transceiver_get_telemetry arm", &response));
+    };
+    println!(
+        "attitude:         pitch {:.1}° roll {:.1}° heading {:.1}°",
+        t.antenna_pitch, t.antenna_roll, t.antenna_true_heading
+    );
+    println!("snr:              {:.1} dB (L1 avg {:.1} dB)", t.snr_db, t.l1_snr_avg_db);
+    println!("wb rssi peak:     {:.1} dB", t.wb_rssi_peak_mag_db);
+    println!("pop ping drop:    {:.2}%", t.pop_ping_drop_rate * 100.0);
+    println!("cell id:          {}", t.current_cell_id);
+    println!(
+        "satellite:        serving {}  target {}",
+        t.lmac_satellite_id, t.target_satellite_id
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// wifi-status (router)
+// ---------------------------------------------------------------------------
+
+fn cmd_wifi_status(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_status())?;
+    let Some(Body::WifiGetStatus(w)) = &response.body else {
+        return Err(status_or("response carried no wifi_get_status arm (is --addr the router?)", &response));
+    };
+    if let Some(di) = &w.device_info {
+        println!("router id:        {}", di.id);
+        println!("software:         {}", di.software_version);
+    }
+    if let Some(ds) = &w.device_state {
+        println!("uptime:           {}", human_duration(ds.uptime_s));
+    }
+    println!("paired dish:      {}", w.dish_id);
+    println!("wan ipv4:         {}", non_empty(&w.ipv4_wan_address));
+    for a in &w.ipv6_wan_addresses {
+        println!("wan ipv6:         {a}");
+    }
+    if w.secs_since_last_public_ipv4_change > 0.0 {
+        println!(
+            "ipv4 stable for:  {}",
+            human_duration(w.secs_since_last_public_ipv4_change as u64)
+        );
+    }
+    println!("no wan link:      {}", w.no_wan_link);
+    println!("hops from ctrl:   {}", w.hops_from_controller);
+    println!();
+    println!("ping (drop / latency):");
+    println!(
+        "  → dish:         {:.2}% / {:.2} ms",
+        w.dish_ping_drop_rate * 100.0,
+        w.dish_ping_latency_ms
+    );
+    println!(
+        "  → pop:          {:.2}% / {:.2} ms  (5m drop {:.2}%)",
+        w.pop_ping_drop_rate * 100.0,
+        w.pop_ping_latency_ms,
+        w.pop_ping_drop_rate_5m * 100.0,
+    );
+    println!(
+        "  → internet:     {:.2}% / {:.2} ms  (5m drop {:.2}%)",
+        w.ping_drop_rate * 100.0,
+        w.ping_latency_ms,
+        w.ping_drop_rate_5m * 100.0,
+    );
+
+    let alerts = active_wifi_alerts(w.alerts.as_ref());
+    println!();
+    if alerts.is_empty() {
+        println!("alerts:           none");
+    } else {
+        println!("alerts:           {}", alerts.join(", "));
+    }
+    Ok(())
+}
+
+fn active_wifi_alerts(a: Option<&starlink_proto::response::WifiAlerts>) -> Vec<&'static str> {
+    let Some(a) = a else { return Vec::new() };
+    let mut out = Vec::new();
+    for (set, name) in [
+        (a.thermal_throttle, "thermal_throttle"),
+        (a.install_pending, "install_pending"),
+        (a.lan_eth_slow_link_10, "lan_eth_slow_link_10"),
+        (a.lan_eth_slow_link_100, "lan_eth_slow_link_100"),
+        (a.wan_eth_poor_connection, "wan_eth_poor_connection"),
+        (a.mesh_unreliable_backhaul, "mesh_unreliable_backhaul"),
+        (a.high_cable_ping_drop_rate, "high_cable_ping_drop_rate"),
+    ] {
+        if set {
+            out.push(name);
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// wifi-history (router)
+// ---------------------------------------------------------------------------
+
+fn cmd_wifi_history(addr: &str, samples: usize) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_history())?;
+    let Some(Body::WifiGetHistory(h)) = &response.body else {
+        return Err(status_or("response carried no wifi_get_history arm (is --addr the router?)", &response));
+    };
+
+    let n = h.ping_latency_ms.len();
+    let window = samples.min(n);
+    println!(
+        "history window:   {window} of {n} 1 Hz samples (~{}), index {}",
+        human_duration(window as u64),
+        h.current
+    );
+    println!();
+    report(
+        "internet latency (ms)",
+        &recent(&h.ping_latency_ms, h.current, window),
+        2,
+    );
+    report_pct(
+        "internet drop",
+        &recent(&h.ping_drop_rate, h.current, window),
+    );
+
+    // The *_last_15s arrays are coarse 15-second buckets on their own index.
+    println!();
+    println!("15-second-bucket drop rates (avg / max over last {} buckets):", h.pop_ipv4_ping_drop_rate_last_15s.len());
+    report15("  pop ipv4", &h.pop_ipv4_ping_drop_rate_last_15s);
+    report15("  pop ipv6", &h.pop_ipv6_ping_drop_rate_last_15s);
+    report15("  google ipv4", &h.google_ipv4_ping_drop_rate_last_15s);
+    report15("  google ipv6", &h.google_ipv6_ping_drop_rate_last_15s);
+    report15("  cloudflare ipv4", &h.cloudflare_ipv4_ping_drop_rate_last_15s);
+    report15("  cloudflare ipv6", &h.cloudflare_ipv6_ping_drop_rate_last_15s);
+    Ok(())
+}
+
+/// Print avg/max for a 15-second-bucket drop-rate series (already a complete
+/// ring; order does not matter for avg/max).
+fn report15(label: &str, v: &[f32]) {
+    match stats(v) {
+        Some(st) => println!(
+            "{label:<18} avg {:.2}%  max {:.2}%",
+            st.mean * 100.0,
+            st.max * 100.0
+        ),
+        None => println!("{label:<18} (no data)"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ping-metrics (router)
+// ---------------------------------------------------------------------------
+
+fn cmd_ping_metrics(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::wifi_get_ping_metrics())?;
+    let Some(Body::WifiGetPingMetrics(WifiGetPingMetricsResponse { internet: Some(m) })) = &response.body else {
+        return Err(status_or("response carried no wifi_get_ping_metrics arm", &response));
+    };
+    println!("internet ping metrics:");
+    println!(
+        "  latency:        {:.2} ms (±{:.2})",
+        m.latency_mean_ms, m.latency_stddev_ms
+    );
+    println!(
+        "  drop rate:      now {:.2}%  5m {:.2}%  1h {:.2}%",
+        m.drop_rate * 100.0,
+        m.drop_rate_5m * 100.0,
+        m.drop_rate_1h * 100.0,
+    );
+    println!("  last success:   {:.0}s ago", m.seconds_since_last_success);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// radio-stats (router)
+// ---------------------------------------------------------------------------
+
+fn cmd_radio_stats(addr: &str) -> Result<(), String> {
+    let response = fetch(addr, &Request::get_radio_stats())?;
+    let Some(Body::GetRadioStats(GetRadioStatsResponse { radio_stats: rs })) = &response.body
+    else {
+        return Err(status_or("response carried no get_radio_stats arm", &response));
+    };
+    if rs.is_empty() {
+        println!("no radio stats");
+    }
+    for r in rs {
+        println!();
+        println!("  band {}", r.band);
+        if let Some(t) = &r.thermal_status {
+            println!(
+                "    thermal: level {}  {:.1} °C  power -{}%  duty {}%",
+                t.level, t.temp2, t.power_reduction, t.duty_cycle
+            );
+        }
+        if let Some(a) = &r.antenna_status {
+            println!(
+                "    rssi: {:.0} {:.0} {:.0} {:.0} dBm",
+                a.rssi1, a.rssi2, a.rssi3, a.rssi4
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // numeric helpers
 // ---------------------------------------------------------------------------
 
@@ -638,6 +1393,35 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Return `s`, or `-` if it is empty (for tidy table cells).
+fn non_empty(s: &str) -> &str {
+    if s.is_empty() {
+        "-"
+    } else {
+        s
+    }
+}
+
+/// Render a Unix timestamp (seconds) as an ISO-8601 UTC string.  A tiny
+/// epoch-to-civil conversion (Howard Hinnant's algorithm) — no `chrono`.
+fn iso_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (rem / 3600, rem / 60 % 60, rem % 60);
+    // days since 1970-01-01 → civil y/m/d.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
 /// Render a seconds count as `1d 2h 3m` / `2h 3m` / `3m 4s` / `4s`.
 fn human_duration(secs: u64) -> String {
     let (d, h, m, s) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
@@ -676,5 +1460,39 @@ fn block_on<F: Future>(future: F) -> F::Output {
         if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
             return value;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso_utc_known_epochs() {
+        assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn shade_ramps_from_clear_to_obstructed() {
+        assert_eq!(shade(0.0), '·'); // clear sky
+        assert_eq!(shade(0.1), '░');
+        assert_eq!(shade(0.4), '▒');
+        assert_eq!(shade(0.7), '▓');
+        assert_eq!(shade(1.0), '█'); // fully obstructed
+    }
+
+    #[test]
+    fn recent_returns_chronological_tail_of_ring() {
+        // current=3 over a 3-slot ring: newest sample is at (3-1)%3 = 2.
+        let buf = [10.0f32, 20.0, 30.0];
+        assert_eq!(recent(&buf, 3, 2), [20.0, 30.0]);
+    }
+
+    #[test]
+    fn minutes_of_day_wraps_and_pads() {
+        assert_eq!(minutes_of_day(0), "00:00");
+        assert_eq!(minutes_of_day(135), "02:15");
+        assert_eq!(minutes_of_day(1_440), "00:00");
     }
 }
