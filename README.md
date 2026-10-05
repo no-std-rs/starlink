@@ -1,4 +1,4 @@
-# starlink-cli
+# starlink
 
 A `no_std`-first Rust client for the Starlink Device gRPC API.
 
@@ -10,7 +10,7 @@ binary on top that will eventually run on embedded targets as well as Linux.
 ## Workspace layout
 
 ```
-starlink-cli/
+starlink/
 ├── Cargo.toml              # workspace manifest (declares `prost` in [workspace.dependencies])
 ├── rust-toolchain.toml     # pins stable
 └── crates/

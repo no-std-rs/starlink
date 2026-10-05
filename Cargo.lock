@@ -71,7 +71,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "starlink"
+name = "starlink-cli"
 version = "0.1.0"
 dependencies = [
  "prost",
