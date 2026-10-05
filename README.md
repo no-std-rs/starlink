@@ -127,3 +127,19 @@ stacks — one `tonic`-based for Linux and a second hand-rolled one for
 embedded — with subtly different bugs.  Investing the `~500–1000` lines of
 HTTP/2 framing once and sharing it across targets is the smaller long-term
 bet.
+
+## Releases
+
+[Runnerless](.runnerless-ci.ts) in `my-infra` opens a release PR from conventional
+commits. Merging that PR creates a `vX.Y.Z` tag and GitHub Release. The
+[publication workflow](.github/workflows/publish-release.yml) builds Linux x86_64
+and macOS arm64 CLI archives and publishes `starlink-core`, `starlink-proto`,
+then `starlink-cli` to crates.io. The workflow aligns Cargo's workspace version
+and internal dependency requirements with the release tag before building.
+
+The first crates.io publication needs a `CRATES_IO_BOOTSTRAP_TOKEN` secret in
+the `crates-io` GitHub environment. It must allow publishing new crates and can
+be removed after `starlink-core`, `starlink-proto`, and `starlink-cli` each have
+a trusted publisher configured on crates.io for GitHub owner `no-std-rs`,
+repository `starlink`, workflow `publish-release.yml`, and environment
+`crates-io`. Later releases use short lived crates.io tokens from GitHub OIDC.
