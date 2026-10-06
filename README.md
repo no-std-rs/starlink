@@ -141,7 +141,8 @@ dependency order. Cargo versions and internal dependency requirements are
 aligned with the release tag before packaging.
 
 Runnerless needs a crates.io API token in its Production package publishing
-credential set (or the ci-toolkit Worker secret `REGISTRY_STARLINK_CRATES_TOKEN`).
+credential set. Connect this repository in the Runnerless application and add a
+token on the crates.io All packages row.
 The first token must allow publishing new crate names. Rotate it under the
 same credential name for later releases; crates.io Trusted Publishing tokens
 are tied to GitHub Actions and are not used by this Runnerless upload path.
