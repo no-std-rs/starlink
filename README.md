@@ -133,13 +133,15 @@ bet.
 [Runnerless](.runnerless-ci.ts) in `my-infra` opens a release PR from conventional
 commits. Merging that PR creates a `vX.Y.Z` tag and GitHub Release. The
 [publication workflow](.github/workflows/publish-release.yml) builds Linux x86_64
-and macOS arm64 CLI archives and publishes `starlink-core`, `starlink-proto`,
-then `starlink-cli` to crates.io. The workflow aligns Cargo's workspace version
-and internal dependency requirements with the release tag before building.
+and macOS arm64 CLI archives and prepares Cargo upload bodies for `starlink-core`,
+`starlink-proto`, and `starlink-cli`. It attaches the packages and their SHA-256
+checksums to the GitHub Release without a crates.io credential. Runnerless then
+verifies the release, packages, and checksums and uploads the three crates in
+dependency order. Cargo versions and internal dependency requirements are
+aligned with the release tag before packaging.
 
-The first crates.io publication needs a `CRATES_IO_BOOTSTRAP_TOKEN` secret in
-the `crates-io` GitHub environment. It must allow publishing new crates and can
-be removed after `starlink-core`, `starlink-proto`, and `starlink-cli` each have
-a trusted publisher configured on crates.io for GitHub owner `no-std-rs`,
-repository `starlink`, workflow `publish-release.yml`, and environment
-`crates-io`. Later releases use short lived crates.io tokens from GitHub OIDC.
+Runnerless needs a crates.io API token in its Production package publishing
+credential set (or the ci-toolkit Worker secret `REGISTRY_STARLINK_CRATES_TOKEN`).
+The first token must allow publishing new crate names. Rotate it under the
+same credential name for later releases; crates.io Trusted Publishing tokens
+are tied to GitHub Actions and are not used by this Runnerless upload path.
