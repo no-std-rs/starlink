@@ -136,8 +136,8 @@ commits. Merging that PR creates a `vX.Y.Z` tag and GitHub Release. The
 and macOS arm64 CLI archives and prepares Cargo upload bodies for `starlink-core`,
 `starlink-proto`, and `starlink-cli`. It attaches the packages and their SHA-256
 checksums to the GitHub Release without a crates.io credential. Runnerless then
-verifies the release, packages, and checksums and uploads the three crates in
-dependency order. Cargo versions and internal dependency requirements are
+verifies the release, packages, and checksums and uploads each crate as a
+separate operation in dependency order. Cargo versions and internal dependency requirements are
 aligned with the release tag before packaging.
 
 Runnerless needs a crates.io API token in its Production package publishing
