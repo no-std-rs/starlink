@@ -1,5 +1,7 @@
 # starlink
 
+[![Runnerless CI: slowest job](https://badges.runnerlesshq.com/github.com/no-std-rs/starlink/badge.svg)](https://app.runnerlesshq.com)
+
 A `no_std`-first Rust client for the Starlink Device gRPC API.
 
 The dish exposes `SpaceX.API.Device.Device` on `192.168.100.1:9200` over plain
