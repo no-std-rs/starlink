@@ -1,3 +1,4 @@
+import { badges, BadgeSpec } from "runnerless/v1";
 import {
   workflow, configuration, event, repo, packages, checks, jobs,
   OperationRef, OperationRequest, RegistryPublishRequest, WriteResult,
@@ -6,6 +7,7 @@ import {
 const program = workflow().releasePlease();
 
 export function configure(): void {
+  badges.define(new BadgeSpec("badge", "medium", "slowest-job"));
   program.configure();
   configuration.workflow("crate-publishing", ["workflow_run", "runnerless_completion"]);
 }
