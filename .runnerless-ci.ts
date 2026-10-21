@@ -7,6 +7,7 @@ import {
 const program = workflow().releasePlease();
 
 export function configure(): void {
+  configuration.titlePolicy();
   badges.define(new BadgeSpec("badge", "medium", "slowest-job"));
   program.configure();
   configuration.workflow("crate-publishing", ["workflow_run", "runnerless_completion"]);
